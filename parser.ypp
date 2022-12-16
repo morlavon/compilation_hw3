@@ -1,0 +1,518 @@
+%{
+	#include <iostream>
+	#include "hw3_output.hpp"
+	#include "Utils.h"
+	#include "ScopeStacks.h"
+	#include "stacks.h"
+	
+	using namespace std;
+	int yylex();
+	void yyerror(const char*);
+	extern int yylineno;
+
+	ScopeStacks scopeStacks;
+
+	bool isLegalAssignment(TYPE type1, TYPE type2);
+%}
+
+%nonassoc VOID;
+%nonassoc INT;
+%nonassoc BYTE;
+%nonassoc B;
+%nonassoc BOOL;
+%nonassoc TRUE;
+%nonassoc FALSE;
+%nonassoc RETURN;
+%nonassoc WHILE;
+%nonassoc BREAK;
+%nonassoc CONTINUE;
+%nonassoc SC;
+%nonassoc COMMA;
+%nonassoc ID;
+%nonassoc NUM;
+%nonassoc STRING;
+%right ASSIGN;
+%right IF;
+%right ELSE;
+%left OR;
+%left AND;
+%left RELOP_EQ;
+%left RELOP_REL;
+%left BINOP_SUM;
+%left BINOP_MUL;
+%right NOT;
+%left LBRACE;
+%left RBRACE;
+%left LPAREN;
+%left RPAREN;
+
+%%
+
+Program : Funcs {
+			if (yychar == YYEOF) {
+						
+						
+						Symbol sym;
+						
+						bool found = scopeStacks.tablesStack.findId("main", sym);
+
+						if(!found || !sym.argTypes.empty() || sym.retType != EVOID)
+						{
+							output::errorMainMissing();
+							exit(1);
+						}
+						scopeStacks.closeScope();
+					}
+		}
+		;
+		
+Funcs : %empty {}
+		| FuncDecl Funcs {}
+		;
+		
+FuncDecl : RetType ID LPAREN Formals RPAREN
+			{
+				Symbol sym;
+				bool found = scopeStacks.tablesStack.findId(((Id*)$2)->IdName, sym);
+				if(found)
+				{
+					output::errorDef(yylineno, ((Id*)$2)->IdName);
+					exit(1);
+				}
+				std::vector<TYPE> typesList;
+				
+				std::vector<string> namesList; 
+				
+				((ArgumentList*)$4)->generateLists(typesList, namesList);
+				sym = Symbol(((Id*)$2)->IdName, typesList, namesList, ((Type*)$1)->type);
+				scopeStacks.addSymbol(sym);
+				scopeStacks.openScope();
+
+				int offset = -1;
+				for(auto it = ((ArgumentList*)($4))->arguments.begin(); it!=((ArgumentList*)($4))->arguments.end(); it++)
+				{
+					Symbol tempSym;
+					Argument arg = *it;
+					bool found = scopeStacks.tablesStack.findId(arg.name, tempSym);
+					if(found)
+					{
+						output::errorDef(yylineno, arg.name);
+						exit(1);
+					}
+					sym = Symbol(arg.name, arg.type, offset);
+					
+					offset -= 1;
+					
+					scopeStacks.tablesStack.scopes.back().symTable.push_back(sym);
+				}
+			}
+			LBRACE Statements RBRACE 
+			{ scopeStacks.closeScope();}
+		;
+		
+RetType : Type {$$ = $1;}
+		| VOID {$$ = new Type(EVOID);}
+		;
+		
+Formals : %empty {$$ = new ArgumentList();}
+		| FormalsList {$$ = $1;}
+		;
+		
+FormalsList : FormalsDecl {
+					$$ = new ArgumentList();
+					((ArgumentList*)$$)->addArgument(*((Argument*)$1));
+					
+					delete $1;
+					}
+			| FormalsDecl COMMA FormalsList {					
+					((ArgumentList*)$3)->addArgument(*((Argument*)$1));
+					$$ = $3;
+					
+					delete $1;
+					}
+			;
+			
+FormalsDecl : Type ID {$$ = new Argument(((Type*)$1)->type, ((Id*)$2)->IdName);
+				delete $1;
+				
+				delete $2;
+				}
+			;
+			
+Statements : Statement {}
+			| Statements Statement {}
+			;
+			
+Statement : LBRACE OPEN_MARKER Statements RBRACE CLOSE_MARKER {}
+
+
+			| Type ID SC {				
+				Symbol sym;
+				bool found = scopeStacks.tablesStack.findId(((Id*)$2)->IdName, sym);
+
+				if(found)
+				{
+					output::errorDef(yylineno, ((Id*)$2)->IdName);
+					exit(1);
+				}
+
+				sym = Symbol(((Id*)$2)->IdName,((Type*)$1)->type, scopeStacks.offsetsStack.getOffset());
+				scopeStacks.addSymbol(sym);
+				delete $1;
+				
+				delete $2;
+				}
+			
+			
+			
+			| Type ID ASSIGN Exp SC {
+				Symbol sym;
+				bool found = scopeStacks.tablesStack.findId(((Id*)$2)->IdName, sym);
+				
+				if(found)
+				{
+					output::errorDef(yylineno, ((Id*)$2)->IdName);
+					exit(1);
+				}
+				
+				if(!isLegalAssignment(((Type*)$1)->type, ((Type*)$4)->type)) {
+					output::errorMismatch(yylineno);
+					exit(1);
+				}
+				sym = Symbol(((Id*)$2)->IdName,((Type*)$1)->type, scopeStacks.offsetsStack.getOffset());
+				scopeStacks.addSymbol(sym);
+				delete $1;
+				
+				delete $2;
+				
+				delete $4;
+				}
+			
+			
+			| ID ASSIGN Exp SC {				
+				Symbol sym;
+				bool found = scopeStacks.tablesStack.findId(((Id*)$1)->IdName, sym);
+
+				if(!found || sym.type==EFUNC)
+				{
+					
+					output::errorUndef(yylineno, ((Id*)$1)->IdName);
+					exit(1);
+				}
+
+				if(!isLegalAssignment(sym.type, ((Type*)$3)->type)) {
+					output::errorMismatch(yylineno);
+					exit(1);
+				}
+
+				
+				delete $1;
+
+				delete $3;
+				}
+			
+			
+			| Call SC {}
+			
+		
+			| RETURN SC {				
+				if(scopeStacks.tablesStack.lastFuncRetType()!= EVOID)
+					{
+						output::errorMismatch(yylineno);
+						
+						exit(1);
+					}
+				}
+			
+			
+			
+			| RETURN Exp SC {
+				if(scopeStacks.tablesStack.lastFuncRetType() == EVOID || !isLegalAssignment(scopeStacks.tablesStack.lastFuncRetType(), ((Type*)$2)->type))
+				{
+					output::errorMismatch(yylineno);
+					
+					exit(1);
+				}
+				$$=$2;
+				}
+			
+			
+			
+			| IF LPAREN BoolExp RPAREN OPEN_MARKER Statement CLOSE_MARKER %prec IF {}
+			
+			| IF LPAREN BoolExp RPAREN OPEN_MARKER Statement CLOSE_MARKER ELSE OPEN_MARKER Statement CLOSE_MARKER {}
+			
+			| WHILE LPAREN BoolExp RPAREN WHILE_OPEN_MARKER Statement CLOSE_MARKER {}
+			
+			| BREAK SC {
+				if(!scopeStacks.isWhileScope())
+				{
+					output::errorUnexpectedBreak(yylineno);
+					exit(1);
+				}
+			}
+			| CONTINUE SC {			
+				if(!scopeStacks.isWhileScope())
+				{
+					output::errorUnexpectedContinue(yylineno);
+					exit(1);
+				}
+			}
+			;
+			
+Call : ID LPAREN ExpList RPAREN {
+				Symbol sym;
+				bool found = scopeStacks.tablesStack.findId(((Id*)$1)->IdName, sym);
+				if(!found)
+				{
+					output::errorUndefFunc(yylineno, ((Id*)$1)->IdName);
+					exit(1);
+				}
+
+				if (!sym.checkArgTypes(*((TypeList*)$3))){
+					vector<string> typeList = sym.typeStringList();
+					output::errorPrototypeMismatch(yylineno, sym.name, typeList);
+					exit(1);
+				}
+
+				$$ = new Type(sym.retType);
+				delete $1;
+				delete $3;
+				}
+				
+	| ID LPAREN RPAREN {
+				Symbol sym;
+				bool found = scopeStacks.tablesStack.findId(((Id*)$1)->IdName, sym);
+				if(!found || sym.type != EFUNC)
+				{
+					output::errorUndefFunc(yylineno, ((Id*)$1)->IdName);
+					exit(1);
+				}
+
+				if (!sym.argTypes.empty()){
+					vector<string> typeList = sym.typeStringList();
+					output::errorPrototypeMismatch(yylineno, sym.name, typeList);
+					exit(1);
+				}
+
+				$$ = new Type(sym.retType);
+				delete $1;
+				}
+	;
+	
+ExpList : Exp {
+			$$ = new TypeList();
+			((TypeList*)$$)->types.push_front(((Type*)$1)->type);
+			delete $1;
+		}
+		| Exp COMMA ExpList {
+			((TypeList*)$3)->types.push_front(((Type*)$1)->type);
+			$$ = $3;
+			delete $1;
+			}
+		;
+		
+Type	: INT {$$ = new Type(EINT);}
+		| BYTE {$$ = new Type(EBYTE);}
+		| BOOL {$$ = new Type(EBOOL);}
+		;
+		
+	
+Exp : LPAREN Exp RPAREN {$$ = $2;}
+
+	| Exp IF LPAREN BoolExp RPAREN ELSE Exp{
+
+		
+				if (((Type*)$1)->type == EBOOL && ((Type*)$7)->type == EBOOL) {
+					$$ = new Type(EBOOL);
+				}
+                else if (((Type*)$1)->type == ESTRING && ((Type*)$7)->type == ESTRING) {
+					$$ = new Type(ESTRING);
+				}
+				else if( !((Type*)$1)->isLegalNum() || !((Type*)$7)->isLegalNum())
+				{
+					output::errorMismatch(yylineno);
+					exit(1);
+				}					
+				else if (((Type*)$1)->type == EINT || ((Type*)$7)->type == EINT) {
+					$$ = new Type(EINT);
+				}
+				else {
+					$$ = new Type(EBYTE);
+				}
+				delete $1;
+				delete $7;
+			}
+	| Exp BINOP_MUL Exp {
+				if(!((Type*)$1)->isLegalNum() || !((Type*)$3)->isLegalNum())
+				{
+					output::errorMismatch(yylineno);
+					exit(1);
+				}
+				if (((Type*)$1)->type == EINT || ((Type*)$3)->type == EINT) {
+					$$ = new Type(EINT);
+				}
+				else {
+					$$ = new Type(EBYTE);
+				}
+				delete $1;
+				delete $3;
+			}
+	
+	
+	| Exp BINOP_SUM Exp {
+				if(!((Type*)$1)->isLegalNum() || !((Type*)$3)->isLegalNum())
+				{
+					output::errorMismatch(yylineno);
+					exit(1);
+				}
+				if (((Type*)$1)->type == EINT || ((Type*)$3)->type == EINT) {
+					$$ = new Type(EINT);
+				}
+				else {
+					$$ = new Type(EBYTE);
+				}
+				delete $1;
+				delete $3;
+				}
+	
+	
+	| ID {
+				Symbol sym;
+				bool found = scopeStacks.tablesStack.findId(((Id*)$1)->IdName, sym);
+
+				if(!found || sym.type == EFUNC)
+				{
+					output::errorUndef(yylineno, ((Id*)$1)->IdName);
+					exit(1);
+				}
+
+				$$ = new Type(sym.type);
+				delete $1;
+			}
+	
+	
+	| Call {$$ = $1;}
+	
+	
+	| NUM {$$ = new Type(EINT);}
+	
+	
+	| NUM B {
+				if (((Num*)$1)->value > 255){
+		
+					output::errorByteTooLarge(yylineno, std::to_string(((Num*)$1)->value));
+					exit(1);
+				}
+				$$ = new Type(EBYTE);
+			}
+	
+	
+	| STRING {$$ = new Type(ESTRING);}
+		
+	| TRUE {$$ = new Type(EBOOL);}
+		
+	| FALSE {$$ = new Type(EBOOL);}
+	
+	
+	| NOT Exp {
+				if (((Type*)$2)->type != EBOOL) {
+					output::errorMismatch(yylineno);
+					exit(1);
+				}
+				$$ = $2;
+			}
+	
+	
+	| Exp AND Exp {
+				if(((Type*)$1)->type != EBOOL || ((Type*)$3)->type != EBOOL)
+				{
+					output::errorMismatch(yylineno);
+					exit(1);
+				}
+
+				$$ = new Type(EBOOL);
+				delete $1;
+				delete $3;
+			}
+	
+	
+	| Exp OR Exp {				
+				if(((Type*)$1)->type!=EBOOL || ((Type*)$3)->type!=EBOOL)
+				{
+					output::errorMismatch(yylineno);
+					exit(1);
+				}
+				
+				$$ = new Type(EBOOL);
+				delete $1;
+				delete $3;	}
+	
+	
+	| Exp RELOP_EQ Exp {
+				if(!(((Type*)$1)->isLegalNum()) || !(((Type*)$3)->isLegalNum())) {
+					output::errorMismatch(yylineno);
+					exit(1);
+				}
+
+				$$ = new Type(EBOOL);
+				delete $1;
+				delete $3;	}
+	
+	
+	| Exp RELOP_REL Exp {
+				if(!(((Type*)$1)->isLegalNum()) || !(((Type*)$3)->isLegalNum())) {
+					output::errorMismatch(yylineno);
+					exit(1);
+				}
+
+				$$ = new Type(EBOOL);
+				delete $1;
+				delete $3;}
+	
+	
+	| LPAREN Type RPAREN Exp {
+				if(!((Type*)$2)->isLegalNum() || !((Type*)$4)->isLegalNum())
+				{
+					output::errorMismatch(yylineno);
+					exit(1);
+				}
+				$$=new Type(((Type*)$2)->type);
+				delete $4;
+				delete $2;}
+	;
+BoolExp : Exp
+			{
+				if (((Type*)$1)->type != EBOOL) {
+					output::errorMismatch(yylineno);
+					exit(1);
+				}
+				$$=$1;
+			}
+			;	
+OPEN_MARKER : %empty {scopeStacks.openScope(scopeStacks.isWhileScope());}
+;
+
+WHILE_OPEN_MARKER : %empty {scopeStacks.openScope(true);}
+;
+
+CLOSE_MARKER : %empty {scopeStacks.closeScope();}
+
+%%
+
+int main()
+{
+	yyparse();
+}
+
+bool isLegalAssignment(TYPE type1, TYPE type2){
+	return ((type1 == EINT && type2 == EBYTE) || (type1 == type2));
+}
+
+void yyerror(const char * message)
+{
+	output::errorSyn(yylineno);
+	exit(0);
+}
+
+
